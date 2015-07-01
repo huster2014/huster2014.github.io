@@ -4,7 +4,7 @@ title: About
 permalink: /about/
 ---
 
-You can contact me if you have some interesting idea or suggest to me!
+You can contact me if you have some interesting ideas or suggestions to me!
 
 ### More Information
 
