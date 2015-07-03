@@ -2,22 +2,27 @@
 layout: post
 title: ceph osd中omap的实现
 ---
-麦子迈博客，“ObjectStore主要接口分为三部分，第一部分是Object的读写操作，类似于POSIX的部分接口，第二部分是Object的属性(xattr)读写操作，这类操作的特征是kv对并且与某一个Object关联。第三部分是关联Object的kv操作(在Ceph中称为omap)，这个其实与第二部分非常类似，但是在实现上可能会有所变化。
-目前ObjectStore的主要实现是FileStore，也就是利用文件系统的POSIX接口实现ObjectStore API。每个Object在FileStore层会被看成是一个文件，Object的属性(xattr)会利用文件的xattr属性存取，因为有些文件系统(如Ext4)对xattr的长度有限制，因此超出长度的Metadata会被存储在DBObjectMap里。而Object的omap则直接利用DBObjectMap实现。因此，可以看出xattr和omap操作是互通的，在用户角度来说，前者可以看作是受限的长度，后者更宽泛(API没有对这些做出硬性要求)。”
+
+   麦子迈博客，“ObjectStore主要接口分为三部分，第一部分是Object的读写操作，类似于POSIX的部分接口，第二部分是Object的属性(xattr)读写操作，这类操作的特征是kv对并且与某一个Object关联。第三部分是关联Object的kv操作(在Ceph中称为omap)，这个其实与第二部分非常类似，但是在实现上可能会有所变化。
+   
+   目前ObjectStore的主要实现是FileStore，也就是利用文件系统的POSIX接口实现ObjectStore API。每个Object在FileStore层会被看成是一个文件，Object的属性(xattr)会利用文件的xattr属性存取，因为有些文件系统(如Ext4)对xattr的长度有限制，因此超出长度的Metadata会被存储在DBObjectMap里。而Object的omap则直接利用DBObjectMap实现。因此，可以看出xattr和omap操作是互通的，在用户角度来说，前者可以看作是受限的长度，后者更宽泛(API没有对这些做出硬性要求)。”
 
 DBObjectMap向上提供了操作omap和xattr的接口，如set_，get_和rm_操作，以及clone和sync操作等。每个object的omap由一个header和多个kv对构成，xattr由多个kv对构成。DBObjectMap实现了omap克隆操作的0-copy，但是xattr则采用直接复制的方式实现克隆；omap还对外提供了一个迭代器，用来实现omap中kv的遍历操作，为了支持0-copy操作，迭代器的实现还是有点复杂的。
  
 上图是取自麦子迈的博客，用来说明0-copy的实现原理。
 图中的header是DBObjectMap内部使用的结构体(不是omap中的header)，每个object对应一个header，记录分配给object的序列号，在leveldb中，object拥有的kv对都以该序列号作为前缀，从而方便在leveldb中进行查找。
 当克隆某个src object时就为src和dst都分配一个新的序列号，并创建相应的新的header结构体，而src原来的header将作为它们的parent header，当查找某object的kv值时，可以根据parent header的序列号在leveldb中查找相应的数据，这部分操作被封装在DBObjectMap的omap迭代器中。
-// 一个全局的序列号分配器
+## 一个全局的序列号分配器
+'''c++
 struct State {
     __u8 v;
     uint64_t seq;
 }
+'''
 
-// 每个object都被分配一个全局唯一的序列号
-// header结构体记录序列号，以及clone操作所产生的父子关系
+每个object都被分配一个全局唯一的序列号
+header结构体记录序列号，以及clone操作所产生的父子关系
+'''c++
 struct _Header {
     uint64_t seq;
     uint64_t parent;
@@ -26,14 +31,16 @@ struct _Header {
     ghobject_t oid;
     SequencerPosition spos;
 }
+'''
 
 // omap的迭代器，其中KeyValueDB::Iterator继承了DBObjectMapIteratorImpl，并实现了具体的key()和value()方法，DBObjectMapIteratorImpl的key()和value()方法直接调用KeyValueDB::Iterator中对应的方法来实现
 // 迭代器中还有一个complete_iter，它指向一个区间表，每个表项为[begin,end)，标识该区间内的所有kv对都以当前header中的序列号为前缀，而不是以parent header的序列号为前缀。它用来实现kv的rm操作，当rm掉object的某对kv时，该kv可能在parent header中，而parent header中的kv是共享，不能直接删除，否则会影响到其它的object，于是先从parent header中位于被删除的kv对附近的多个连续的kv对直接复制的当前object下，并创建一个区间，标识该区间内的所有kv都被拷贝到当前object中，无需访问parent header，这样一来就可以避免操作parent header而完成删除工作了…当然这其中还包括了区间的合并，以及parent header的释放问题，还是有点复杂滴.
+'''c++
 class DBObjectMapIteratorImpl : public ObjectMapIteratorImpl {
   public:
     DBObjectMap *map;
-	MapHeaderLock hlock;
-Header header;
+    MapHeaderLock hlock;
+    Header header;
 
     ceph::shared_ptr<DBObjectMapIteratorImpl> parent_iter;
     KeyValueDB::Iterator key_iter;
@@ -44,6 +51,7 @@ Header header;
     bool ready;
     bool invalid;
  }
+'''
 
 先看一下克隆操作的实现，可以瞥见它的实现原理：
 1)	获取parent header
