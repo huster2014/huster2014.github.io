@@ -1,3 +1,7 @@
+---
+layout: post
+title: ceph osd中omap的实现
+---
 麦子迈博客，“ObjectStore主要接口分为三部分，第一部分是Object的读写操作，类似于POSIX的部分接口，第二部分是Object的属性(xattr)读写操作，这类操作的特征是kv对并且与某一个Object关联。第三部分是关联Object的kv操作(在Ceph中称为omap)，这个其实与第二部分非常类似，但是在实现上可能会有所变化。
 目前ObjectStore的主要实现是FileStore，也就是利用文件系统的POSIX接口实现ObjectStore API。每个Object在FileStore层会被看成是一个文件，Object的属性(xattr)会利用文件的xattr属性存取，因为有些文件系统(如Ext4)对xattr的长度有限制，因此超出长度的Metadata会被存储在DBObjectMap里。而Object的omap则直接利用DBObjectMap实现。因此，可以看出xattr和omap操作是互通的，在用户角度来说，前者可以看作是受限的长度，后者更宽泛(API没有对这些做出硬性要求)。”
 
