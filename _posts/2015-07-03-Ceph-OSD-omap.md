@@ -35,6 +35,7 @@ struct _Header {
 
 // omap的迭代器，其中KeyValueDB::Iterator继承了DBObjectMapIteratorImpl，并实现了具体的key()和value()方法，DBObjectMapIteratorImpl的key()和value()方法直接调用KeyValueDB::Iterator中对应的方法来实现
 // 迭代器中还有一个complete_iter，它指向一个区间表，每个表项为[begin,end)，标识该区间内的所有kv对都以当前header中的序列号为前缀，而不是以parent header的序列号为前缀。它用来实现kv的rm操作，当rm掉object的某对kv时，该kv可能在parent header中，而parent header中的kv是共享，不能直接删除，否则会影响到其它的object，于是先从parent header中位于被删除的kv对附近的多个连续的kv对直接复制的当前object下，并创建一个区间，标识该区间内的所有kv都被拷贝到当前object中，无需访问parent header，这样一来就可以避免操作parent header而完成删除工作了…当然这其中还包括了区间的合并，以及parent header的释放问题，还是有点复杂滴.
+
 ```c++
 class DBObjectMapIteratorImpl : public ObjectMapIteratorImpl {
   public:
@@ -59,6 +60,7 @@ class DBObjectMapIteratorImpl : public ObjectMapIteratorImpl {
 3)	将parent header存放到以sys_prefix(parent)为前缀，key= HEADER_KEY的记录中
 4)	将src(dst) header存放到前缀为HOBJECT_TO_SEQ，key = map_header_key(src)或者key = map_header_key(dst)的记录中。
 5)	以上步骤实现了omap的0-copy，但对于xattr则直接从parent复制到src和dst中，完成之后在从parent中删除xattr。
+
 ```c++
 int DBObjectMap::clone(const ghobject_t &oid,
 		       const ghobject_t &target,
@@ -100,6 +102,7 @@ b)	相应的区间记录在new_complete[]表中，key为begin，value=end
 3)	将to_write[]中记录的kv写入到user_prefix(header)为前缀的表中
 4)	将新的区间和header现有的区间进行合并，并记录到以complete_prefix(header)为前缀的表中，这也就意味着header直接从parent中拷贝相应区间内的kv对，这些区间内的kv不再需要从parent中获取了
 5)	如果header不再需要parent，则递减parent的引用计数，并进行清理
+
 ```c++
 int DBObjectMap::rm_keys(const ghobject_t &oid,
 			 const set<string> &to_clear,
@@ -173,8 +176,10 @@ int DBObjectMap::rm_keys(const ghobject_t &oid,
   return db->submit_transaction(t);
 }
 ```
+
 对omap的遍历依赖于DBObjectStroe的迭代器ObjectMapIteratorImpl，而对xattr的遍历则依赖leveldb的迭代器IteratorImpl，虽然IteratorImpl继承自ObjectMapIteratorImpl，但除了接口相同外它们的作用和实现是完全不同的，IteratorImpl的用来在leveldb中特定的表中进行遍历，而ObjectMapIteratorImpl在IteratorImpl基础之上，实现了对分散在父子header中kv对的遍历。
 几个重要的对象成员：
+
 ```c++
 DBObjectMap *map;
 ceph::shared_ptr<DBObjectMapIteratorImpl> parent_iter; // 指向父header的迭代器
