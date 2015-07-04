@@ -38,6 +38,7 @@ DBObjectMap为每个header结构体都维护一个区间表，每个形表项都
 DBObjectMap的迭代器很有意思，有点递归的味道。下图是一个是执行了clone(obj1，obj2)，…，clone(obj2，obj3)，…，clone(obj3，obj4)之后，header结构体所构成的父子关系。此时用户要求返回obj4一个的迭代器，用来遍历与obj4关联的所有的kv对，你该怎么办?<br>
 ![](/images/omap/iterator.png)<br>
 迭代器不仅需要遍历当前header(序列号为7)对应的kv对，而且还要遍历它的父亲headers(即序列号为seq1，seq3和seq5的header) 的kv对。迭代器的实现伪代码如下(为简单起见，假设不存在kv删除操作)：
+
 ```cpp
 	Class iterator {
 		Virtual void next();
