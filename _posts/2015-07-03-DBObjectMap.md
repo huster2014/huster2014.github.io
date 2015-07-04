@@ -14,20 +14,20 @@ DBObjectMap继承自ObjectMap，ObjectMap则定义了对外的公共接口(由�
 
 ## 实现
 DBObjectMap为每个对象都分配了一个序列号，当向leveldb中插入与某对象关联的kv对时就会以该序列号生成相应的前缀，假设某个对象的序列号为seq，则与该对象关联的omap的kv对的前缀就为：<br>
-Prefix = USER_PREFIX + header_key(seq) + USER_PREFIX <br>
+Prefix = USER\_PREFIX + header\_key(seq) + USER\_PREFIX <br>
 然后通过leveldb的set(prefix，key，value)接口就能将相应的记录插入到leveldb中了。你估计也猜到了，xattr和omap的区别也在于前缀的不同，xattr的kv对的前缀为：<br>
-Prefix = USER_PREFIX + header_key(header->seq) + XATTR_PREFIX <br>
+Prefix = USER\_PREFIX + header\_key(header->seq) + XATTR\_PREFIX <br>
 
 ### 克隆操作
 DBObjectMap之所以复杂，主要在于它实现了kv对的0-copy克隆。前面说过omap适用于存储kv对数量较多的场景，因此实现omap的0-copy克隆就很有诱惑力。那具体是如何实现的呢？答案同样还是在kv对的前缀上。<br>
 ![](/images/omap/clone.png)<br>
 上图是执行clone(src, dst)操作的示意图。为了实现0-copy克隆，每个对象都会对应一个header结构体，它记录了分配给对象的序列号以及克隆操作所产生的父子关系。在上图中，src对象原来的序列号为seq1，执行克隆操作时，DBObjectMap就会为src和dst对象都分配一个新的序列号和新的header结构体，原来的header结构体将作为它们的parent header。<br>
 当访问与dst对象相关联的kv对时，除了通过前缀prefix(seq3)在leveldb中检索kv对外，还能通过前缀prefix(seq1)检索因为克隆操作而与src对象共享的kv对。<br>
-你可能已经注意到了，以prefix(seq1)为前缀的kv对在克隆之后就成为只读的了，因为被多个对象共享，直接修改这些kv对就相当于修改了所有对象的kv映射，这不是DBObjectMap所希望的。所以，当修改某对象已有的kv对时，必须以它当前的序列号作为前缀向leveldb中插入新的kv对。如上图所示，克隆完成之后，修改关联于dst对象的键值为 key1的kv对，将在leveldb中插入以Prefix(seq3)为前缀的新的记录，此时在leveldb中就会出现两个归属于dst对象的且键值相同的kv记录，即<prefix(seq1)，key1， value1>和<prefix(seq3)， key1，value1>，在检索kv对时，直接忽略前者就行了。<br>
+你可能已经注意到了，以prefix(seq1)为前缀的kv对在克隆之后就成为只读的了，因为被多个对象共享，直接修改这些kv对就相当于修改了所有对象的kv映射，这不是DBObjectMap所希望的。所以，当修改某对象已有的kv对时，必须以它当前的序列号作为前缀向leveldb中插入新的kv对。如上图所示，克隆完成之后，修改关联于dst对象的键值为 key1的kv对，将在leveldb中插入以Prefix(seq3)为前缀的新的记录，此时在leveldb中就会出现两个归属于dst对象的且键值相同的kv记录，即\<prefix(seq1)，key1， value1\>和\<prefix(seq3)， key1，value1\>，在检索kv对时，直接忽略前者就行了。<br>
 
-### 删除操作
-前面已经介绍了如何在克隆成功之后添加或者更新对象的kv对，那怎样删除对象的kv对呢？是否能够直接将相应的kv对删除？例如，假设要删除上图中dst对象键值为key1的记录，如果直接删除<prefix(seq3)， key1，value1>，那么在下次检索键值为key1的kv对的时候就会返回<prefix(seq1)，key1， value1>，但实际上应该要返回空值。考虑到kv对<prefix(seq1)，key1， value1>既不能删除又不能修改，那么可以采取如下可能的措施：<br>
-* 将<prefix(seq3)， key1，value1>更新为<prefix(seq3)， key1，None>，借助空值None来表示该kv对已经被删除；<br>
+### 删除操
+前面已经介绍了如何在克隆成功之后添加或者更新对象的kv对，那怎样删除对象的kv对呢？是否能够直接将相应的kv对删除？例如，假设要删除上图中dst对象键值为key1的记录，如果直接删除\<prefix(seq3)， key1，value1\>，那么在下次检索键值为key1的kv对的时候就会返\回<prefix(seq1)，key1， value1\>，但实际上应该要返回空值。考虑到kv对\<prefix(seq1)，key1， value1\>既不能删除又不能修改，那么可以采取如下可能的措施：<br>
+* 将\<prefix(seq3)， key1，value1\>更新为\<prefix(seq3)， key1，None\>，借助空值None来表示该kv对已经被删除；<br>
 * 添加一个数据结构，明确指出dst对象的键值为key1的kv对不存在于parent header中。<br>
 第一种方法相当于为对应的kv对创建了一个DeadStone，将删除操作转化成了插入操作，这是一个很广泛采用的技巧。但是DBObjectMap采用了第二张方法，请不要问我为什么，它就是这么干的！当然，直接采用第二种方法必然很没有效率，那么DBObjectMap具体是怎么做的呢？<br>
 DBObjectMap为每个header结构体都维护一个区间表，每个形表项都代表了一个区间，如[start，end)，它表示在该区间内的任何kv对都不存在于parent header中。当需要删除某个对象的键值为key的kv对时，DBObjectMap就会从parent header中读取键值为key~key+20的kv对，然后以前缀为prefix(seq3)重新插入到leveldb中，然后向区间表中插入一个区间项[key，key+20)，暗示用户该访问区间内的kv对时直接无视parent header就好了… 仔细分析，你会发现这个过程其实是一个变相的copy on write技巧，这也是一个很常用的技巧。<br>
