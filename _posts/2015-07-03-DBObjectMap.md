@@ -3,7 +3,7 @@ layout: post
 title: ceph osd中omap的实现
 ---
 
-FileStore作为ObjectStore最终的实现之一，封装了OSD底层所有的I/O操作。FileStore除了提供读写Object的接口外，还提供了访问Object的属性(xattr)和omap的接口。Xattr和omap都是key-value对的集合，它们的主要区别体现在实现上，xattr借助于文件的xattr属性实现存取，而omap则借助DBObjectMap将kv对存储在leveldb等数据库中。<br>
+FileStore作为ObjectStore最重要的实现之一，封装了OSD底层所有的I/O操作。FileStore除了提供读写Object的接口外，还提供了访问Object的属性(xattr)和omap的接口。Xattr和omap都是key-value对的集合，它们的主要区别体现在实现上，xattr借助于文件的xattr属性实现存取，而omap则借助DBObjectMap将kv对存储在leveldb等数据库中。<br>
 由于文件的xattr属性在长度上有限制，xattr“溢出”的部分也会被存放在DBObjectMap中，所以从用户的角度来看，xattr适合于存取数量较少的kv对，而omap适合于存取数量不限的kv对。下面重点探究DBObjectMap在实现上的技巧。<br>
 
 ## 接口
@@ -26,7 +26,7 @@ DBObjectMap之所以复杂，主要在于它实现了kv对的0-copy克隆。前�
 你可能已经注意到了，以prefix(seq1)为前缀的kv对在克隆之后就成为只读的了，因为被多个对象共享，直接修改这些kv对就相当于修改了所有对象的kv映射，这不是DBObjectMap所希望的。所以，当修改某对象已有的kv对时，必须以它当前的序列号作为前缀向leveldb中插入新的kv对。如上图所示，克隆完成之后，修改关联于dst对象的键值为 key1的kv对，将在leveldb中插入以Prefix(seq3)为前缀的新的记录，此时在leveldb中就会出现两个归属于dst对象的且键值相同的kv记录，即\<prefix(seq1)，key1， value1\>和\<prefix(seq3)， key1，value1\>，在检索kv对时，直接忽略前者就行了。<br>
 
 ### 删除操
-前面已经介绍了如何在克隆成功之后添加或者更新对象的kv对，那怎样删除对象的kv对呢？是否能够直接将相应的kv对删除？例如，假设要删除上图中dst对象键值为key1的记录，如果直接删除\<prefix(seq3)， key1，value1\>，那么在下次检索键值为key1的kv对的时候就会返\回<prefix(seq1)，key1， value1\>，但实际上应该要返回空值。考虑到kv对\<prefix(seq1)，key1， value1\>既不能删除又不能修改，那么可以采取如下可能的措施：<br>
+前面已经介绍了如何在克隆成功之后添加或者更新对象的kv对，那怎样删除对象的kv对呢？是否能够直接将相应的kv对删除？例如，假设要删除上图中dst对象键值为key1的记录，如果直接删除\<prefix(seq3)， key1，value1\>，那么在下次检索键值为key1的kv对的时候就会返回\<prefix(seq1)，key1， value1\>，但实际上应该要返回空值。考虑到kv对\<prefix(seq1)，key1， value1\>既不能删除又不能修改，那么可以采取如下可能的措施：<br>
 * 将\<prefix(seq3)， key1，value1\>更新为\<prefix(seq3)， key1，None\>，借助空值None来表示该kv对已经被删除；<br>
 * 添加一个数据结构，明确指出dst对象的键值为key1的kv对不存在于parent header中。<br>
 第一种方法相当于为对应的kv对创建了一个DeadStone，将删除操作转化成了插入操作，这是一个很广泛采用的技巧。但是DBObjectMap采用了第二张方法，请不要问我为什么，它就是这么干的！当然，直接采用第二种方法必然很没有效率，那么DBObjectMap具体是怎么做的呢？<br>
@@ -44,13 +44,13 @@ DBObjectMap的迭代器很有意思，有点递归的味道。下图是一个是
 		Virtual void next();
 		Virtual void *value()
 	};
-	Class leveldb_iterator::iterator {  // 用来遍历具有prefix(seq)的kv对
+	Class leveldb_iterator::public iterator {  // 用来遍历具有prefix(seq)的kv对
 		leveldb_iterator(seq);
 		void next();
 		void *value()
 	}
-	Class Header_Iterator::iterator // 用来遍历关联与某个对象的kv对
-{
+	Class Header_Iterator::public iterator // 用来遍历关联与某个对象的kv对
+        {
 		Header_Iterator *parent; // 指向父迭代器
 		Leveldb_iterator *key_iter; // 执行leveldb的迭代器
 		Iterator *cur; // 等于parent或者key_iterator，该迭代器指向正在被访问的kv对
@@ -68,8 +68,11 @@ DBObjectMap的迭代器很有意思，有点递归的味道。下图是一个是
 			cur->next(); // 递归调用迭代器的next()方法
 			if(parent && key_iter->value() > parent->value()) 
 				cur = parent;
-			else
+			else {
 				cur = key_iter;
+                                while(parent && parent->valid() && parent->value() <= key_iter->value())
+                                      parent-next();
+                        }
 		}
 		void *Value() {
 			If (cur->valid()) // 递归调用迭代器的value方法
