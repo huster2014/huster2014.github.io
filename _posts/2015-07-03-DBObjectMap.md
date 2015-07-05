@@ -70,8 +70,10 @@ DBObjectMap的迭代器很有意思，有点递归的味道。下图是一个是
 				cur = parent;
 			else {
 				cur = key_iter;
-                                while(parent && parent->valid() && parent->value() <= key_iter->value())
-                                      parent-next();
+				while(parent 
+				    && parent->valid() 
+				    && parent->value() <= key_iter->value())
+					parent->next();
                         }
 		}
 		void *Value() {
